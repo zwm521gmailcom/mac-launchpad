@@ -3,15 +3,24 @@ import Foundation
 public enum LayoutEdit {
     public static let defaultFolderName = "文件夹"
 
-    public static func fresh(records: [AppRecord]) -> Layout {
+    public static func fresh(records: [AppRecord], capacity: Int = Layout.pageCapacity) -> Layout {
         let items = records.sorted(by: displayNameOrder).map { PageItem.app($0.bundleID) }
-        let pages = stride(from: 0, to: items.count, by: Layout.pageCapacity).map { start in
-            Array(items[start..<min(start + Layout.pageCapacity, items.count)])
+        return reflow(layout: Layout(pages: [items]), capacity: capacity)
+    }
+
+    /// 保持现有顺序，按新的每页容量重新分页。除最后一页外，每一页都排满。
+    public static func reflow(layout: Layout, capacity: Int) -> Layout {
+        let capacity = max(capacity, 1)
+        let items = layout.pages.flatMap { $0 }
+        guard !items.isEmpty else { return Layout(pages: []) }
+        let pages = stride(from: 0, to: items.count, by: capacity).map { start in
+            Array(items[start..<min(start + capacity, items.count)])
         }
         return Layout(pages: pages)
     }
 
-    public static func reconcile(layout: Layout, records: [AppRecord]) -> Layout {
+    public static func reconcile(layout: Layout, records: [AppRecord], capacity: Int = Layout.pageCapacity) -> Layout {
+        let capacity = max(capacity, 1)
         let known = Set(records.map(\.bundleID))
         var placed = Set<String>()
         var pages: [[PageItem]] = []
@@ -36,7 +45,7 @@ public enum LayoutEdit {
         }
         let newcomers = records.filter { !placed.contains($0.bundleID) }.sorted(by: displayNameOrder)
         for record in newcomers {
-            if let index = pages.firstIndex(where: { $0.count < Layout.pageCapacity }) {
+            if let index = pages.firstIndex(where: { $0.count < capacity }) {
                 pages[index].append(.app(record.bundleID))
             } else {
                 pages.append([.app(record.bundleID)])
@@ -50,7 +59,8 @@ public enum LayoutEdit {
         fromPage: Int,
         fromIndex: Int,
         toPage: Int,
-        indexAfterRemoval: Int
+        indexAfterRemoval: Int,
+        capacity: Int = Layout.pageCapacity
     ) -> Layout {
         var pages = layout.pages
         guard pages.indices.contains(fromPage), pages[fromPage].indices.contains(fromIndex) else {
@@ -63,7 +73,7 @@ public enum LayoutEdit {
         guard pages.indices.contains(toPage) else { return layout }
         let bounded = min(max(indexAfterRemoval, 0), pages[toPage].count)
         pages[toPage].insert(item, at: bounded)
-        pages = spill(pages)
+        pages = spill(pages, capacity: capacity)
         pages.removeAll { $0.isEmpty }
         return Layout(pages: pages)
     }
@@ -112,7 +122,7 @@ public enum LayoutEdit {
         return Layout(pages: pages)
     }
 
-    public static func moveOutOfFolder(layout: Layout, bundleID: String, folderID: UUID) -> Layout {
+    public static func moveOutOfFolder(layout: Layout, bundleID: String, folderID: UUID, capacity: Int = Layout.pageCapacity) -> Layout {
         guard let located = locateFolder(layout, folderID),
               case .folder(var folder) = layout.pages[located.page][located.index],
               folder.bundleIDs.contains(bundleID) else { return layout }
@@ -120,7 +130,7 @@ public enum LayoutEdit {
         folder.bundleIDs.removeAll { $0 == bundleID }
         pages[located.page][located.index] = .folder(folder)
         pages[located.page].insert(.app(bundleID), at: pages[located.page].count)
-        pages = spill(pages)
+        pages = spill(pages, capacity: capacity)
         if folder.bundleIDs.isEmpty, let again = locateFolder(Layout(pages: pages), folderID) {
             pages[again.page].remove(at: again.index)
         }
@@ -155,11 +165,12 @@ public enum LayoutEdit {
         return Layout(pages: pages)
     }
 
-    private static func spill(_ pages: [[PageItem]]) -> [[PageItem]] {
+    private static func spill(_ pages: [[PageItem]], capacity: Int) -> [[PageItem]] {
+        let capacity = max(capacity, 1)
         var pages = pages
         var index = 0
         while index < pages.count {
-            while pages[index].count > Layout.pageCapacity {
+            while pages[index].count > capacity {
                 let extra = pages[index].removeLast()
                 if index + 1 == pages.count {
                     pages.append([])

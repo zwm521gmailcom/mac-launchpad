@@ -11,16 +11,30 @@ struct PageGridView: View {
     let onLaunch: (String) -> Void
     let onOpenFolder: (UUID) -> Void
     var reportsFolderFrames: Bool = false
+    var gesturesEnabled: Bool = true
+    var reportsIconFrames: Bool = true
+    var suppressedIndex: Int? = nil
+    var columnCount: Int = 7
+    var iconSide: CGFloat = 64
+    var columnSpacing: CGFloat = 20
+    var rowSpacing: CGFloat = 22
     var onDragChanged: (Int, CGPoint) -> Void
     var onDragEnded: (Int, CGPoint) -> Void
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 18), count: 7)
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: columnSpacing), count: max(columnCount, 1))
+    }
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 22) {
+        LazyVGrid(columns: columns, spacing: rowSpacing) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                 tile(index: index, item: item)
-                    .background(frameReader(index: index, item: item))
+                    .opacity(suppressedIndex == index ? 0 : 1)
+                    .background {
+                        if reportsIconFrames {
+                            frameReader(index: index, item: item)
+                        }
+                    }
             }
         }
         .background {
@@ -37,9 +51,13 @@ struct PageGridView: View {
 
     @ViewBuilder
     private func tile(index: Int, item: PageItem) -> some View {
-        PressableTile(dragEnabled: dragEnabled, onActivate: { activate(item) }) { point in
-            onDragChanged(index, point)
-        } label: {
+        if gesturesEnabled {
+            PressableTile(dragEnabled: dragEnabled, onActivate: { activate(item) }) { point in
+                onDragChanged(index, point)
+            } label: {
+                tileLabel(item)
+            }
+        } else {
             tileLabel(item)
         }
     }
@@ -48,9 +66,9 @@ struct PageGridView: View {
     private func tileLabel(_ item: PageItem) -> some View {
         switch item {
         case .app(let bundleID):
-            if let app = record(bundleID) { AppTile(record: app) } else { EmptyView() }
+            if let app = record(bundleID) { AppTile(record: app, iconSide: iconSide) } else { EmptyView() }
         case .folder(let folder):
-            FolderTile(folder: folder, record: record)
+            FolderTile(folder: folder, record: record, iconSide: iconSide)
         }
     }
 
@@ -64,7 +82,8 @@ struct PageGridView: View {
     private func frameReader(index: Int, item: PageItem) -> some View {
         GeometryReader { proxy in
             let cell = proxy.frame(in: .named("launchpad"))
-            let icon = CGRect(x: cell.midX - 32, y: cell.minY, width: 64, height: 64)
+            let side = iconSide
+            let icon = CGRect(x: cell.midX - side / 2, y: cell.minY, width: side, height: side)
             let cellValue = [GridCell(
                 index: index,
                 bundleID: { if case .app(let bundleID) = item { return bundleID }; return nil }(),
@@ -135,12 +154,13 @@ private struct PressableTile<Label: View>: View {
 
 struct AppTile: View {
     let record: AppRecord
+    var iconSide: CGFloat = 64
 
     var body: some View {
         VStack(spacing: 6) {
             Image(nsImage: NSWorkspace.shared.icon(forFile: record.url.path))
                 .resizable()
-                .frame(width: 64, height: 64)
+                .frame(width: iconSide, height: iconSide)
             Text(record.displayName)
                 .font(.caption)
                 .lineLimit(1)
@@ -153,16 +173,17 @@ struct AppTile: View {
 struct FolderTile: View {
     let folder: FolderItem
     let record: (String) -> AppRecord?
+    var iconSide: CGFloat = 64
 
     var body: some View {
         VStack(spacing: 6) {
             ZStack {
-                RoundedRectangle(cornerRadius: 16)
+                RoundedRectangle(cornerRadius: iconSide * 0.25)
                     .fill(.white.opacity(0.18))
-                    .frame(width: 64, height: 64)
-                VStack(spacing: 3) {
+                    .frame(width: iconSide, height: iconSide)
+                VStack(spacing: max(2, iconSide * 0.05)) {
                     ForEach(0..<2, id: \.self) { row in
-                        HStack(spacing: 3) {
+                        HStack(spacing: max(2, iconSide * 0.05)) {
                             ForEach(0..<2, id: \.self) { column in
                                 miniIcon(at: row * 2 + column)
                             }
@@ -181,11 +202,12 @@ struct FolderTile: View {
     @ViewBuilder
     private func miniIcon(at index: Int) -> some View {
         if folder.bundleIDs.indices.contains(index), let app = record(folder.bundleIDs[index]) {
+            let side = iconSide * 0.34
             Image(nsImage: NSWorkspace.shared.icon(forFile: app.url.path))
                 .resizable()
-                .frame(width: 22, height: 22)
+                .frame(width: side, height: side)
         } else {
-            Color.clear.frame(width: 22, height: 22)
+            Color.clear.frame(width: iconSide * 0.34, height: iconSide * 0.34)
         }
     }
 }
