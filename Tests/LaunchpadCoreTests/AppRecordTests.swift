@@ -1,13 +1,14 @@
-import XCTest
+import Foundation
+import Testing
 @testable import LaunchpadCore
 
-final class AppRecordTests: XCTestCase {
-    func testIdentityIsBundleID() {
+struct AppRecordTests {
+    @Test func identityIsBundleID() {
         let record = AppRecord(
             bundleID: "com.example.Safari",
             displayName: "Safari",
             url: URL(fileURLWithPath: "/Applications/Safari.app")
         )
-        XCTAssertEqual(record.id, "com.example.Safari")
+        #expect(record.id == "com.example.Safari")
     }
 }
