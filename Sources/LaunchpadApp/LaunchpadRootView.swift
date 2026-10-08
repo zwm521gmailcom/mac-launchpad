@@ -16,6 +16,8 @@ final class LaunchpadRootUIState: ObservableObject {
     var folderCells: [GridCell] = []
     var rootBounds: CGRect = .zero
     var bottomBarFrame: CGRect = .zero
+    var sizeControlFrame: CGRect = .zero
+    var searchFieldFrame: CGRect = .zero
     var folderGridFrame: CGRect = .null
     var dragFrom: (page: Int, index: Int)?
     var folderDragIndex: Int?
@@ -175,7 +177,16 @@ final class LaunchpadRootUIState: ObservableObject {
             if current is NSTextField || current is NSSlider { return true }
             view = current.superview
         }
-        return bottomBarFrame.contains(pointer(event))
+        let point = pointer(event)
+        return bottomBarFrame.contains(point)
+            || sizeControlFrame.contains(point)
+            || searchFieldFrame.contains(point)
+    }
+
+    enum PointerOutcome {
+        case none
+        case launch(String)
+        case dismiss
     }
 
     func pointerDown(at point: CGPoint, model: LaunchpadModel) {
@@ -225,13 +236,13 @@ final class LaunchpadRootUIState: ObservableObject {
         }
     }
 
-    func pointerUp(at point: CGPoint, model: LaunchpadModel) -> String? {
+    func pointerUp(at point: CGPoint, model: LaunchpadModel) -> PointerOutcome {
         pickupTask?.cancel()
         defer { pendingIndex = nil }
         if ignoringPointer {
             ignoringPointer = false
             pointerMode = .idle
-            return nil
+            return .none
         }
         switch pointerMode {
         case .paging:
@@ -248,13 +259,18 @@ final class LaunchpadRootUIState: ObservableObject {
             }
             pointerMode = .idle
         case .pending:
-            let bundleID = (pendingIndex ?? cellIndex(at: point)).flatMap { bundleIDToOpen(at: $0, model: model) }
+            if let index = pendingIndex ?? cellIndex(at: point) {
+                let bundleID = bundleIDToOpen(at: index, model: model)
+                pointerMode = .idle
+                if let bundleID { return .launch(bundleID) }
+                return .none
+            }
             pointerMode = .idle
-            return bundleID
+            return .dismiss
         case .idle, .locked:
             pointerMode = .idle
         }
-        return nil
+        return .none
     }
 
     func beginIgnoringPointer() {
@@ -380,6 +396,14 @@ struct LaunchpadRootView: View {
                 .padding(10)
                 .frame(width: 280)
                 .background(.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 10))
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: SearchFieldKey.self,
+                            value: proxy.frame(in: .named("launchpad"))
+                        )
+                    }
+                }
                 if let launchError = model.launchError {
                     Text(launchError).foregroundStyle(.white)
                 }
@@ -439,10 +463,19 @@ struct LaunchpadRootView: View {
             }
         }
         .onPreferenceChange(RootBoundsKey.self) { ui.rootBounds = $0 }
+        .onPreferenceChange(SearchFieldKey.self) { ui.searchFieldFrame = $0 }
+        .onPreferenceChange(SizeControlKey.self) { ui.sizeControlFrame = $0 }
         .background(ScrollWheelPageTurner(enabled: pagingEnabled && ui.pointerMode != .paging && ui.pointerMode != .lifting) { delta in
             if delta < 0 { model.showNextPage() } else { model.showPreviousPage() }
         })
-        .background(DesktopPointerMonitor(enabled: pagingEnabled, ui: ui, model: model, onLaunch: launch))
+        .background(DesktopPointerMonitor(
+            pagingEnabled: pagingEnabled,
+            dismissEnabled: model.openFolderID == nil && !ui.editingFolderName,
+            ui: ui,
+            model: model,
+            onLaunch: launch,
+            onDismiss: dismiss
+        ))
         .background(SearchTypingMonitor(enabled: !ui.editingFolderName, model: model, onEscape: handleEscape))
         .onAppear { ui.focus = .search }
         .onChange(of: model.pageIndex) { _, newPage in
@@ -592,6 +625,14 @@ struct LaunchpadRootView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.black.opacity(0.45), in: Capsule())
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: SizeControlKey.self,
+                    value: proxy.frame(in: .named("launchpad"))
+                )
+            }
+        }
     }
 
     private var pageDots: some View {
@@ -618,6 +659,13 @@ struct LaunchpadRootView: View {
 
     private func launch(_ bundleID: String) {
         if model.launch(bundleID) { onHide() }
+    }
+
+    private func dismiss() {
+        model.query = ""
+        model.openFolderID = nil
+        ui.editingFolderName = false
+        onHide()
     }
 
     private func handleEscape() {
@@ -998,6 +1046,16 @@ private struct SizeControl: NSViewRepresentable {
     }
 }
 
+private struct SearchFieldKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+private struct SizeControlKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
 private struct BottomBarKey: PreferenceKey {
     static var defaultValue: CGRect = .zero
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
@@ -1009,10 +1067,12 @@ private struct PageBoxKey: PreferenceKey {
 }
 
 private struct DesktopPointerMonitor: NSViewRepresentable {
-    var enabled: Bool
+    var pagingEnabled: Bool
+    var dismissEnabled: Bool
     var ui: LaunchpadRootUIState
     var model: LaunchpadModel
     var onLaunch: (String) -> Void
+    var onDismiss: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -1026,10 +1086,12 @@ private struct DesktopPointerMonitor: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.enabled = enabled
+        context.coordinator.pagingEnabled = pagingEnabled
+        context.coordinator.dismissEnabled = dismissEnabled
         context.coordinator.ui = ui
         context.coordinator.model = model
         context.coordinator.onLaunch = onLaunch
+        context.coordinator.onDismiss = onDismiss
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -1042,18 +1104,23 @@ private struct DesktopPointerMonitor: NSViewRepresentable {
 
     final class Coordinator {
         var monitor: Any?
-        var enabled = false
+        var pagingEnabled = false
+        var dismissEnabled = false
         weak var ui: LaunchpadRootUIState?
         weak var model: LaunchpadModel?
         var onLaunch: (String) -> Void = { _ in }
+        var onDismiss: () -> Void = {}
+        private var blankArmed = false
+        private var blankStart = CGPoint.zero
 
         func handle(_ event: NSEvent) {
             guard let ui, let model else { return }
-            if !enabled {
+            if !pagingEnabled {
                 if ui.pointerMode == .paging || ui.pointerMode == .lifting {
                     ui.pointerMode = .idle
                     ui.alignOffset(to: model.pageIndex)
                 }
+                if dismissEnabled { trackBlankClick(event) }
                 return
             }
             let point = ui.pointer(event)
@@ -1067,9 +1134,41 @@ private struct DesktopPointerMonitor: NSViewRepresentable {
             case .leftMouseDragged:
                 ui.pointerDragged(to: point, model: model)
             case .leftMouseUp:
-                if let bundleID = ui.pointerUp(at: point, model: model) {
+                switch ui.pointerUp(at: point, model: model) {
+                case .launch(let bundleID):
                     onLaunch(bundleID)
+                case .dismiss where dismissEnabled:
+                    onDismiss()
+                case .dismiss, .none:
+                    break
                 }
+            default:
+                break
+            }
+        }
+
+        /// 搜索时不翻页，只认空白处的轻点。
+        private func trackBlankClick(_ event: NSEvent) {
+            guard let ui else { return }
+            let point = ui.pointer(event)
+            switch event.type {
+            case .leftMouseDown:
+                if ui.shouldIgnore(event) || ui.cellIndex(at: point) != nil {
+                    blankArmed = false
+                    return
+                }
+                blankArmed = true
+                blankStart = point
+            case .leftMouseDragged:
+                if blankArmed, hypot(point.x - blankStart.x, point.y - blankStart.y) > 8 {
+                    blankArmed = false
+                }
+            case .leftMouseUp:
+                guard blankArmed else { return }
+                blankArmed = false
+                guard !ui.shouldIgnore(event), ui.cellIndex(at: point) == nil else { return }
+                guard hypot(point.x - blankStart.x, point.y - blankStart.y) <= 8 else { return }
+                onDismiss()
             default:
                 break
             }

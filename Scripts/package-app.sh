@@ -4,8 +4,9 @@ cd "$(dirname "$0")/.."
 swift build -c release
 APP="MacLaunchpad.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/MacLaunchpad "$APP/Contents/MacOS/MacLaunchpad"
+bash Scripts/make-icon.sh "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -19,6 +20,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <string>MacLaunchpad</string>
   <key>CFBundleDisplayName</key>
   <string>程序启动台</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -32,4 +35,5 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
+codesign --force --sign - "$APP" >/dev/null
 echo "built $APP"
