@@ -1,4 +1,4 @@
-// swift-tools-version: 6.4
+// swift-tools-version: 5.9
 import PackageDescription
 
 let package = Package(
@@ -9,14 +9,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "LaunchpadCore"),
-        .testTarget(
-            name: "LaunchpadCoreTests",
-            dependencies: ["LaunchpadCore"],
-            swiftSettings: [
-                .unsafeFlags([
-                    "-plugin-path", "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
-                ])
-            ]
-        )
+        .testTarget(name: "LaunchpadCoreTests", dependencies: ["LaunchpadCore"])
     ]
 )
