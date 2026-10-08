@@ -83,6 +83,26 @@ final class LaunchpadModel: ObservableObject {
         commit(LayoutEdit.renameFolder(layout: layout, folderID: id, name: name))
     }
 
+    func makeFolder(dragged: String, onto: String) {
+        commit(LayoutEdit.makeFolder(layout: layout, draggedBundleID: dragged, ontoBundleID: onto, folderID: UUID()))
+    }
+
+    func addToFolder(bundleID: String, folderID: UUID) {
+        commit(LayoutEdit.addToFolder(layout: layout, bundleID: bundleID, folderID: folderID))
+    }
+
+    func moveOut(bundleID: String, folderID: UUID) {
+        commit(LayoutEdit.moveOutOfFolder(layout: layout, bundleID: bundleID, folderID: folderID))
+    }
+
+    func reorder(fromPage: Int, fromIndex: Int, toPage: Int, indexAfterRemoval: Int) {
+        commit(LayoutEdit.move(layout: layout, fromPage: fromPage, fromIndex: fromIndex, toPage: toPage, indexAfterRemoval: indexAfterRemoval))
+    }
+
+    func reorderFolderMember(folderID: UUID, fromIndex: Int, indexAfterRemoval: Int) {
+        commit(LayoutEdit.reorderFolder(layout: layout, folderID: folderID, fromIndex: fromIndex, indexAfterRemoval: indexAfterRemoval))
+    }
+
     func commit(_ newLayout: Layout) {
         layout = newLayout
         memory = newLayout

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreGraphics
 import LaunchpadCore
 import SwiftUI
 
@@ -10,6 +11,121 @@ final class LaunchpadRootUIState: ObservableObject {
     @Published var escapeCancelsRename = false
     @Published var folderDraft = ""
     @Published var focus: FocusTarget? = .search
+
+    var mainCells: [GridCell] = []
+    var folderCells: [GridCell] = []
+    var rootBounds: CGRect = .zero
+    var folderGridFrame: CGRect = .null
+    var dragFrom: (page: Int, index: Int)?
+    var folderDragIndex: Int?
+    var dragMonitor: Any?
+    var edgeTask: Task<Void, Never>?
+    var edgeDirection: Int?
+    var transientPage = false
+
+    func dragChanged(index: Int, point: CGPoint, inFolder: Bool, model: LaunchpadModel) {
+        guard dragMonitor == nil else { return }
+        if inFolder {
+            folderDragIndex = index
+        } else if model.layout.pages.indices.contains(model.pageIndex) {
+            dragFrom = (model.pageIndex, index)
+        }
+        dragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+            guard let self else { return event }
+            let point = self.pointer(event)
+            if event.type == .leftMouseUp { self.finishDrag(at: point, model: model) }
+            else { self.follow(point, model: model) }
+            return event
+        }
+    }
+
+    func pointer(_ event: NSEvent) -> CGPoint {
+        let location = event.locationInWindow
+        let height = event.window?.contentView?.bounds.height ?? rootBounds.height
+        return CGPoint(x: location.x, y: height - location.y)
+    }
+
+    func follow(_ point: CGPoint, model: LaunchpadModel) {
+        guard folderDragIndex == nil else { return }
+        let edge = GridHit.edge(at: point, in: rootBounds)
+        guard edge != edgeDirection else { return }
+        edgeDirection = edge
+        edgeTask?.cancel()
+        guard let edge else { return }
+        edgeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            self.turn(edge, model: model)
+        }
+    }
+
+    func turn(_ edge: Int, model: LaunchpadModel) {
+        if edge < 0 {
+            guard model.pageIndex > 0 else { return }
+            if transientPage {
+                transientPage = false
+                model.pageIndex = max(0, model.layout.pages.count - 1)
+            } else {
+                model.showPreviousPage()
+            }
+            return
+        }
+        if model.pageIndex + 1 < model.layout.pages.count {
+            model.showNextPage()
+        } else if !transientPage {
+            transientPage = true
+            model.pageIndex = model.layout.pages.count
+        }
+    }
+
+    func finishDrag(at point: CGPoint, model: LaunchpadModel) {
+        guard dragFrom != nil || folderDragIndex != nil else { return }
+        if let dragMonitor { NSEvent.removeMonitor(dragMonitor) }
+        self.dragMonitor = nil
+        edgeTask?.cancel()
+        if let index = folderDragIndex, let folderID = model.openFolderID {
+            if !folderGridFrame.contains(point),
+               let folder = model.folder(folderID),
+               folder.bundleIDs.indices.contains(index) {
+                model.moveOut(bundleID: folder.bundleIDs[index], folderID: folderID)
+            } else if case .insert(let displayedIndex) = GridHit.drop(
+                at: point, cells: folderCells, draggedIsApp: true, allowsNewFolder: false
+            ) {
+                let target = DragIndex.afterRemoval(fromIndex: index, displayedIndex: displayedIndex, sameList: true)
+                model.reorderFolderMember(folderID: folderID, fromIndex: index, indexAfterRemoval: target)
+            }
+        } else if let origin = dragFrom, model.layout.pages.indices.contains(origin.page) {
+            let item = model.layout.pages[origin.page][origin.index]
+            let draggedIsApp = { if case .app = item { return true }; return false }()
+            let drop = GridHit.drop(at: point, cells: mainCells, draggedIsApp: draggedIsApp, allowsNewFolder: true)
+            switch drop {
+            case .makeFolder(let target):
+                if case .app(let dragged) = item { model.makeFolder(dragged: dragged, onto: target) }
+            case .addToFolder(let folderID):
+                if case .app(let dragged) = item { model.addToFolder(bundleID: dragged, folderID: folderID) }
+            case .insert(let displayedIndex):
+                let toPage = min(model.pageIndex, model.layout.pages.count)
+                let target = DragIndex.afterRemoval(
+                    fromIndex: origin.index,
+                    displayedIndex: displayedIndex,
+                    sameList: origin.page == toPage
+                )
+                model.reorder(fromPage: origin.page, fromIndex: origin.index, toPage: toPage, indexAfterRemoval: target)
+            }
+        }
+        dragFrom = nil
+        folderDragIndex = nil
+        edgeDirection = nil
+        if transientPage, model.pageIndex >= model.layout.pages.count {
+            model.pageIndex = max(0, model.layout.pages.count - 1)
+        }
+        transientPage = false
+    }
+}
+
+private struct RootBoundsKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
 }
 
 struct LaunchpadRootView: View {
@@ -39,17 +155,30 @@ struct LaunchpadRootView: View {
                         PageGridView(
                             items: model.searchResults.map { .app($0.bundleID) },
                             record: model.record(_:),
+                            dragEnabled: false,
                             onLaunch: launch,
-                            onOpenFolder: { _ in }
+                            onOpenFolder: { _ in },
+                            reportsFolderFrames: false,
+                            onDragChanged: { _, _ in },
+                            onDragEnded: { _, _ in }
                         )
                     }
-                } else if model.layout.pages.indices.contains(model.pageIndex) {
+                } else {
                     PageGridView(
-                        items: model.layout.pages[model.pageIndex],
+                        items: model.layout.pages.indices.contains(model.pageIndex)
+                            ? model.layout.pages[model.pageIndex]
+                            : [],
                         record: model.record(_:),
+                        dragEnabled: !model.isSearching,
                         onLaunch: launch,
-                        onOpenFolder: { model.openFolderID = $0 }
+                        onOpenFolder: { model.openFolderID = $0 },
+                        reportsFolderFrames: false,
+                        onDragChanged: { index, point in
+                            ui.dragChanged(index: index, point: point, inFolder: false, model: model)
+                        },
+                        onDragEnded: { _, _ in }
                     )
+                    .onPreferenceChange(MainIconFrameKey.self) { ui.mainCells = $0 }
                 }
                 Spacer(minLength: 0)
                 pageDots
@@ -59,6 +188,16 @@ struct LaunchpadRootView: View {
                 folderOverlay(folder)
             }
         }
+        .coordinateSpace(name: "launchpad")
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: RootBoundsKey.self,
+                    value: proxy.frame(in: .named("launchpad"))
+                )
+            }
+        }
+        .onPreferenceChange(RootBoundsKey.self) { ui.rootBounds = $0 }
         .background(ScrollWheelPageTurner(enabled: !model.isSearching && model.openFolderID == nil) { delta in
             if delta < 0 { model.showNextPage() } else { model.showPreviousPage() }
         })
@@ -86,8 +225,9 @@ struct LaunchpadRootView: View {
     }
 
     private var pageDots: some View {
-        HStack(spacing: 8) {
-            ForEach(model.layout.pages.indices, id: \.self) { index in
+        let dotCount = model.layout.pages.count + (model.pageIndex >= model.layout.pages.count ? 1 : 0)
+        return HStack(spacing: 8) {
+            ForEach(0..<dotCount, id: \.self) { index in
                 Circle()
                     .fill(index == model.pageIndex ? Color.white : Color.white.opacity(0.35))
                     .frame(width: 8, height: 8)
@@ -145,14 +285,20 @@ struct LaunchpadRootView: View {
                             ui.focus = .folderName
                         }
                 }
-                ScrollView {
-                    PageGridView(
-                        items: folder.bundleIDs.map { .app($0) },
-                        record: model.record(_:),
-                        onLaunch: launch,
-                        onOpenFolder: { _ in }
-                    )
-                }
+                PageGridView(
+                    items: folder.bundleIDs.map { .app($0) },
+                    record: model.record(_:),
+                    dragEnabled: true,
+                    onLaunch: launch,
+                    onOpenFolder: { _ in },
+                    reportsFolderFrames: true,
+                    onDragChanged: { index, point in
+                        ui.dragChanged(index: index, point: point, inFolder: true, model: model)
+                    },
+                    onDragEnded: { _, _ in }
+                )
+                .onPreferenceChange(FolderIconFrameKey.self) { ui.folderCells = $0 }
+                .onPreferenceChange(FolderGridFrameKey.self) { ui.folderGridFrame = $0 }
             }
             .padding(32)
         }
