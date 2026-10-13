@@ -391,7 +391,7 @@ struct LaunchpadRootView: View {
                     text: $model.query,
                     placeholder: "搜索",
                     isFocused: false,
-                    readsOnly: true
+                    onSubmit: launchFirstResult
                 )
                 .padding(10)
                 .frame(width: 280)
@@ -476,7 +476,13 @@ struct LaunchpadRootView: View {
             onLaunch: launch,
             onDismiss: dismiss
         ))
-        .background(SearchTypingMonitor(enabled: !ui.editingFolderName, model: model, onEscape: handleEscape))
+        .background(SearchTypingMonitor(
+            enabled: !ui.editingFolderName,
+            model: model,
+            onEscape: handleEscape,
+            onSubmit: launchFirstResult,
+            onPage: turnPageFromKeyboard
+        ))
         .onAppear { ui.focus = .search }
         .onChange(of: model.pageIndex) { _, newPage in
             guard ui.pointerMode != .paging, ui.pageWidth > 1 else { return }
@@ -658,10 +664,32 @@ struct LaunchpadRootView: View {
     }
 
     private func launch(_ bundleID: String) {
-        if model.launch(bundleID) { onHide() }
+        guard model.launch(bundleID) else { return }
+        endSearchEditing()
+        model.query = ""
+        onHide()
+    }
+
+    private func launchFirstResult() {
+        guard model.isSearching, let first = model.searchResults.first else { return }
+        launch(first.bundleID)
+    }
+
+    private func turnPageFromKeyboard(_ step: Int) -> Bool {
+        guard pagingEnabled, ui.pointerMode != .paging, ui.pointerMode != .lifting else { return false }
+        if step < 0 { model.showPreviousPage() } else { model.showNextPage() }
+        return true
+    }
+
+    /// 搜索框被点中后由字段编辑器接管文字；清空或收起前先交还焦点，界面才会显示新内容。
+    private func endSearchEditing() {
+        guard !ui.editingFolderName, let window = NSApp.keyWindow,
+              window.firstResponder is NSTextView else { return }
+        window.makeFirstResponder(nil)
     }
 
     private func dismiss() {
+        endSearchEditing()
         model.query = ""
         model.openFolderID = nil
         ui.editingFolderName = false
@@ -675,6 +703,7 @@ struct LaunchpadRootView: View {
             return
         }
         if model.isSearching {
+            endSearchEditing()
             model.query = ""
             return
         }
@@ -908,6 +937,8 @@ private struct SearchTypingMonitor: NSViewRepresentable {
     var enabled: Bool
     var model: LaunchpadModel
     var onEscape: () -> Void
+    var onSubmit: () -> Void
+    var onPage: (Int) -> Bool
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -921,6 +952,8 @@ private struct SearchTypingMonitor: NSViewRepresentable {
         context.coordinator.enabled = enabled
         context.coordinator.model = model
         context.coordinator.onEscape = onEscape
+        context.coordinator.onSubmit = onSubmit
+        context.coordinator.onPage = onPage
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -936,17 +969,35 @@ private struct SearchTypingMonitor: NSViewRepresentable {
         var enabled = false
         weak var model: LaunchpadModel?
         var onEscape: () -> Void = {}
+        var onSubmit: () -> Void = {}
+        var onPage: (Int) -> Bool = { _ in false }
 
         func handle(_ event: NSEvent) -> NSEvent? {
-            guard enabled, event.window?.isKeyWindow == true, let model else { return event }
+            guard enabled, let window = event.window, window.isKeyWindow, let model else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if flags.contains(.command) || flags.contains(.control) || flags.contains(.option) {
                 return event
             }
+            let editor = window.firstResponder as? NSTextView
+            // 输入法正在拼字时，回车、退格、Esc 都交给输入法。
+            if editor?.hasMarkedText() == true { return event }
             switch event.keyCode {
             case 53:
                 onEscape()
                 return nil
+            case 36, 76:
+                guard model.isSearching else { return event }
+                onSubmit()
+                return nil
+            case 123, 124:
+                guard editor != nil, model.query.isEmpty else { return event }
+                return onPage(event.keyCode == 123 ? -1 : 1) ? nil : event
+            default:
+                break
+            }
+            // 鼠标点进搜索框后，由文本框自己处理打字、选择和中文输入。
+            if editor != nil { return event }
+            switch event.keyCode {
             case 51:
                 if !model.query.isEmpty {
                     model.query.removeLast()
