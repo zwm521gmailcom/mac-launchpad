@@ -11,14 +11,20 @@ final class LaunchpadModel: ObservableObject {
     @Published var launchError: String?
     @Published var iconSide: CGFloat
     @Published private(set) var gridMetrics = GridMetrics(icon: 120, columns: 7, rows: 5)
+    @Published private(set) var sortByUsage: Bool
 
+    /// 用户自己的排列，也是写进 layout.json 的那份；按常用排序时 `layout` 只是它的显示版本。
     private var memory: Layout?
     private let store: LayoutStore
     private let openURL: (URL) -> Bool
     private var errorGeneration = 0
     private var fittedWidth: CGFloat = 0
     private var fittedHeight: CGFloat = 0
+    private var ownUsage: [String: LaunchUsage]
+    private var usage: [String: LaunchUsage]
     private static let iconSideKey = "MacLaunchpad.iconSide"
+    private static let usageKey = "MacLaunchpad.launchUsage"
+    private static let sortByUsageKey = "MacLaunchpad.sortByUsage"
 
     init(
         store: LayoutStore = LayoutStore(fileURL: LayoutStore.defaultFileURL()),
@@ -28,6 +34,10 @@ final class LaunchpadModel: ObservableObject {
         self.openURL = openURL
         let stored = UserDefaults.standard.double(forKey: Self.iconSideKey)
         iconSide = stored >= GridMetrics.minimumIcon ? CGFloat(stored) : 120
+        let savedUsage = UserDefaults.standard.data(forKey: Self.usageKey)
+        ownUsage = savedUsage.flatMap { try? JSONDecoder().decode([String: LaunchUsage].self, from: $0) } ?? [:]
+        usage = ownUsage
+        sortByUsage = UserDefaults.standard.bool(forKey: Self.sortByUsageKey)
     }
 
     var isSearching: Bool {
@@ -35,7 +45,7 @@ final class LaunchpadModel: ObservableObject {
     }
 
     var searchResults: [AppRecord] {
-        AppSearch.filter(layout: layout, records: records, query: query)
+        AppSearch.filter(layout: layout, records: records, query: query, usage: usage)
     }
 
     func record(_ bundleID: String) -> AppRecord? {
@@ -58,8 +68,22 @@ final class LaunchpadModel: ObservableObject {
             facts: BundleDisplayNameReader.facts(at:)
         )
         let stored = memory == nil ? store.load() : nil
-        layout = SessionPolicy.layoutForShow(memory: memory, stored: stored, records: records)
-        memory = layout
+        memory = SessionPolicy.layoutForShow(memory: memory, stored: stored, records: records)
+        usage = UsageSort.merge(ownUsage, SystemUsageReader.usage(for: records))
+        redisplay()
+    }
+
+    func setSortByUsage(_ on: Bool) {
+        guard on != sortByUsage else { return }
+        sortByUsage = on
+        UserDefaults.standard.set(on, forKey: Self.sortByUsageKey)
+        pageIndex = 0
+        redisplay()
+    }
+
+    private func redisplay() {
+        let manual = memory ?? Layout(pages: [])
+        layout = sortByUsage ? UsageSort.arrange(manual, usage: usage, capacity: gridMetrics.capacity) : manual
         if layout.pages.isEmpty {
             pageIndex = 0
         } else if pageIndex >= layout.pages.count {
@@ -74,6 +98,11 @@ final class LaunchpadModel: ObservableObject {
         guard let record = record(bundleID) else { return false }
         if openURL(record.url) {
             launchError = nil
+            ownUsage = AppSearch.recordingLaunch(ownUsage, bundleID: bundleID, at: Date())
+            usage = UsageSort.merge(usage, ownUsage)
+            if let data = try? JSONEncoder().encode(ownUsage) {
+                UserDefaults.standard.set(data, forKey: Self.usageKey)
+            }
             return true
         }
         launchError = SessionPolicy.launchFailureMessage(displayName: record.displayName)
@@ -87,24 +116,26 @@ final class LaunchpadModel: ObservableObject {
     }
 
     func renameFolder(id: UUID, to name: String) {
-        commit(LayoutEdit.renameFolder(layout: layout, folderID: id, name: name))
+        commit(LayoutEdit.renameFolder(layout: manual, folderID: id, name: name))
     }
 
     func makeFolder(dragged: String, onto: String) {
-        commit(LayoutEdit.makeFolder(layout: layout, draggedBundleID: dragged, ontoBundleID: onto, folderID: UUID()))
+        commit(LayoutEdit.makeFolder(layout: manual, draggedBundleID: dragged, ontoBundleID: onto, folderID: UUID()))
     }
 
     func addToFolder(bundleID: String, folderID: UUID) {
-        commit(LayoutEdit.addToFolder(layout: layout, bundleID: bundleID, folderID: folderID))
+        commit(LayoutEdit.addToFolder(layout: manual, bundleID: bundleID, folderID: folderID))
     }
 
     func moveOut(bundleID: String, folderID: UUID) {
-        commit(LayoutEdit.moveOutOfFolder(layout: layout, bundleID: bundleID, folderID: folderID, capacity: gridMetrics.capacity))
+        commit(LayoutEdit.moveOutOfFolder(layout: manual, bundleID: bundleID, folderID: folderID, capacity: gridMetrics.capacity))
     }
 
+    /// 页码和位置是按屏幕上看到的算的，按常用排序时和保存的排列对不上，所以不处理。
     func reorder(fromPage: Int, fromIndex: Int, toPage: Int, indexAfterRemoval: Int) {
+        guard !sortByUsage else { return }
         commit(LayoutEdit.move(
-            layout: layout,
+            layout: manual,
             fromPage: fromPage,
             fromIndex: fromIndex,
             toPage: toPage,
@@ -112,6 +143,8 @@ final class LaunchpadModel: ObservableObject {
             capacity: gridMetrics.capacity
         ))
     }
+
+    private var manual: Layout { memory ?? layout }
 
     func setIconSide(_ side: CGFloat) {
         let next = min(GridMetrics.maximumIcon, max(GridMetrics.minimumIcon, side))
@@ -128,16 +161,15 @@ final class LaunchpadModel: ObservableObject {
         guard next != gridMetrics else { return }
         let capacityChanged = next.capacity != gridMetrics.capacity
         gridMetrics = next
-        guard reflow, capacityChanged, !layout.pages.isEmpty else { return }
+        guard reflow, capacityChanged, !manual.pages.isEmpty else { return }
         let anchor = anchorToken
-        layout = LayoutEdit.reflow(layout: layout, capacity: next.capacity)
-        memory = layout
+        let reflowed = LayoutEdit.reflow(layout: manual, capacity: next.capacity)
+        memory = reflowed
+        redisplay()
         if let anchor, let page = pageIndex(containing: anchor) {
             pageIndex = page
-        } else if pageIndex >= layout.pages.count {
-            pageIndex = max(0, layout.pages.count - 1)
         }
-        try? store.save(layout)
+        try? store.save(reflowed)
     }
 
     private var anchorToken: String? {
@@ -164,15 +196,12 @@ final class LaunchpadModel: ObservableObject {
     }
 
     func reorderFolderMember(folderID: UUID, fromIndex: Int, indexAfterRemoval: Int) {
-        commit(LayoutEdit.reorderFolder(layout: layout, folderID: folderID, fromIndex: fromIndex, indexAfterRemoval: indexAfterRemoval))
+        commit(LayoutEdit.reorderFolder(layout: manual, folderID: folderID, fromIndex: fromIndex, indexAfterRemoval: indexAfterRemoval))
     }
 
     func commit(_ newLayout: Layout) {
-        layout = newLayout
         memory = newLayout
-        if pageIndex >= layout.pages.count {
-            pageIndex = max(0, layout.pages.count - 1)
-        }
+        redisplay()
         try? store.save(newLayout)
     }
 

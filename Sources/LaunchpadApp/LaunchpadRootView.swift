@@ -174,7 +174,7 @@ final class LaunchpadRootUIState: ObservableObject {
         guard let content = event.window?.contentView else { return false }
         var view = content.hitTest(event.locationInWindow)
         while let current = view {
-            if current is NSTextField || current is NSSlider { return true }
+            if current is NSControl { return true }
             view = current.superview
         }
         let point = pointer(event)
@@ -291,7 +291,8 @@ final class LaunchpadRootUIState: ObservableObject {
     }
 
     func beginLift(index: Int, at point: CGPoint, model: LaunchpadModel) {
-        guard model.layout.pages.indices.contains(model.pageIndex),
+        guard !model.sortByUsage,
+              model.layout.pages.indices.contains(model.pageIndex),
               model.layout.pages[model.pageIndex].indices.contains(index) else { return }
         pointerMode = .lifting
         dragFrom = (model.pageIndex, index)
@@ -444,7 +445,7 @@ struct LaunchpadRootView: View {
         .clipped()
         .overlay {
             GeometryReader { geo in
-                let controlWidth = SizeControlBox.preferredSize.width + 32
+                let controlWidth = SizeControlBox.preferredSize.width + Self.sortPickerWidth + 16 + 32
                 let controlHeight = SizeControlBox.preferredSize.height + 16
                 sizeControl
                     .position(
@@ -619,15 +620,30 @@ struct LaunchpadRootView: View {
         .onPreferenceChange(BottomBarKey.self) { ui.bottomBarFrame = $0 }
     }
 
+    private static let sortPickerWidth: CGFloat = 130
+
     private var sizeControl: some View {
-        SizeControl(
-            value: Binding(
-                get: { model.iconSide },
-                set: { model.setIconSide($0) }
-            ),
-            range: GridMetrics.minimumIcon...GridMetrics.maximumIcon
-        )
-        .frame(width: SizeControlBox.preferredSize.width, height: SizeControlBox.preferredSize.height)
+        HStack(spacing: 16) {
+            SizeControl(
+                value: Binding(
+                    get: { model.iconSide },
+                    set: { model.setIconSide($0) }
+                ),
+                range: GridMetrics.minimumIcon...GridMetrics.maximumIcon
+            )
+            .frame(width: SizeControlBox.preferredSize.width, height: SizeControlBox.preferredSize.height)
+            Picker("排列", selection: Binding(
+                get: { model.sortByUsage },
+                set: { model.setSortByUsage($0) }
+            )) {
+                Text("自定义").tag(false)
+                Text("常用").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: Self.sortPickerWidth)
+            .environment(\.colorScheme, .dark)
+        }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.black.opacity(0.45), in: Capsule())
@@ -891,7 +907,8 @@ private struct ScrollWheelPageTurner: NSViewRepresentable {
             case .ended, .cancelled:
                 coordinator.pagedThisGesture = false
             default:
-                if horizontal { coordinator.pageDiscrete(event) }
+                // 只有普通滚轮这种不带 phase 的事件才按一格一页处理，避免触控板手势误触发。
+                if event.phase.isEmpty { coordinator.pageDiscrete(event) }
             }
             return event
         }
@@ -926,9 +943,14 @@ private struct ScrollWheelPageTurner: NSViewRepresentable {
 
         func pageDiscrete(_ event: NSEvent) {
             let now = Date()
-            guard now.timeIntervalSince(lastDiscretePage) > 0.35 else { return }
+            guard now.timeIntervalSince(lastDiscretePage) > 0.2 else { return }
+            let dx = event.scrollingDeltaX
+            let dy = event.scrollingDeltaY
+            let horizontal = abs(dx) > abs(dy)
+            let delta = horizontal ? dx : dy
+            guard abs(delta) >= 1 else { return }
             lastDiscretePage = now
-            onPage(event.scrollingDeltaX > 0 ? -1 : 1)
+            onPage(delta > 0 ? -1 : 1)
         }
     }
 }
